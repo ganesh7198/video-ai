@@ -1,123 +1,206 @@
-"use client" 
+"use client";
 
 import {
-    ImageKitAbortError,
-    ImageKitInvalidRequestError,
-    ImageKitServerError,
-    ImageKitUploadNetworkError,
-    upload,
+  ImageKitAbortError,
+  ImageKitInvalidRequestError,
+  ImageKitServerError,
+  ImageKitUploadNetworkError,
+  upload,
 } from "@imagekit/next";
 import { useRef, useState } from "react";
 
-
 const FileUpload = () => {
-   
-    const [progress, setProgress] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef(new AbortController());
 
-    
-    const fileInputRef = useRef<HTMLInputElement>(null);
+  const [progress, setProgress] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [imageUrl, setImageUrl] = useState("");
+  const [error, setError] = useState("");
 
-    
-    const abortController = new AbortController();
+  const authenticator = async () => {
+    try {
+      const response = await fetch("/api/upload-auth");
 
-	
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
 
-    /**
-     * Authenticates and retrieves the necessary upload credentials from the server.
-     *
-     * This function calls the authentication API endpoint to receive upload parameters like signature,
-     * expire time, token, and publicKey.
-     *
-     * @returns {Promise<{signature: string, expire: string, token: string, publicKey: string}>} The authentication parameters.
-     * @throws {Error} 
-     */
-    const authenticator = async () => {
-        try {
-            const response = await fetch("/api/upload-auth");
-            if (!response.ok) {
-                
-                const errorText = await response.text();
-                throw new Error(`Request failed with status ${response.status}: ${errorText}`);
-            }
+      const data = await response.json();
 
-          
-            const data = await response.json();
-            const { signature, expire, token, publicKey } = data;
-            return { signature, expire, token, publicKey };
-        } catch (error) {
-          
-            console.error("Authentication error:", error);
-            throw new Error("Authentication request failed");
-        }
-    };
+      return {
+        signature: data.signature,
+        expire: data.expire,
+        token: data.token,
+        publicKey: data.publicKey,
+      };
+    } catch (err) {
+      console.error(err);
+      throw new Error("Authentication failed");
+    }
+  };
 
-  
-    const handleUpload = async () => {
-        
-        const fileInput = fileInputRef.current;
-        if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-            alert("Please select a file to upload");
-            return;
-        }
+  const handleUpload = async () => {
+    setError("");
+    setImageUrl("");
+    setProgress(0);
 
-   const file = fileInput.files[0];
+    const input = fileInputRef.current;
 
-       
-        let authParams;
-        try {
-            authParams = await authenticator();
-        } catch (authError) {
-            console.error("Failed to authenticate for upload:", authError);
-            return;
-        }
-        const { signature, expire, token, publicKey } = authParams;
+    if (!input?.files?.length) {
+      alert("Please select a file");
+      return;
+    }
 
-      
-        try {
-            const uploadResponse = await upload({
-               
-                expire,
-                token,
-                signature,
-                publicKey,
-                file,
-                fileName: file.name, 
-                onProgress: (event) => {
-                    setProgress((event.loaded / event.total) * 100);
-                },
-               
-                abortSignal: abortController.signal,
-            });
-            console.log("Upload response:", uploadResponse);
-        } catch (error) {
-           
-            if (error instanceof ImageKitAbortError) {
-                console.error("Upload aborted:", error.reason);
-            } else if (error instanceof ImageKitInvalidRequestError) {
-                console.error("Invalid request:", error.message);
-            } else if (error instanceof ImageKitUploadNetworkError) {
-                console.error("Network error:", error.message);
-            } else if (error instanceof ImageKitServerError) {
-                console.error("Server error:", error.message);
-            } else {
-                
-                console.error("Upload error:", error);
-            }
-        }
-    };
+    const file = input.files[0];
 
-    return (
-        <>
-         
-            <input type="file" ref={fileInputRef} />
-           
-            <button type="button" onClick={handleUpload}>
-                Upload file
-            </button>
-            <br />
-            Upload progress: <progress value={progress} max={100}></progress>
-        </>
-    );
+    // Image validation
+    if (!file.type.startsWith("image/")) {
+      setError("Only image files are allowed.");
+      return;
+    }
+
+    // 5 MB validation
+    if (file.size > 5 * 1024 * 1024) {
+      setError("Image must be smaller than 5MB.");
+      return;
+    }
+
+    setLoading(true);
+
+    // Create a fresh AbortController for this upload
+    abortControllerRef.current = new AbortController();
+
+    try {
+      const auth = await authenticator();
+
+      const response = await upload({
+        file,
+        fileName: file.name,
+        signature: auth.signature,
+        token: auth.token,
+        expire: auth.expire,
+        publicKey: auth.publicKey,
+
+        abortSignal: abortControllerRef.current.signal,
+
+        onProgress: (event) => {
+          const percent = Math.round(
+            (event.loaded / event.total) * 100
+          );
+
+          setProgress(percent);
+        },
+      });
+
+      console.log(response);
+
+      setImageUrl(response.url);
+
+      alert("Upload Successful!");
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    } catch (err) {
+      if (err instanceof ImageKitAbortError) {
+        setError("Upload cancelled.");
+      } else if (err instanceof ImageKitInvalidRequestError) {
+        setError(err.message);
+      } else if (err instanceof ImageKitUploadNetworkError) {
+        setError("Network error.");
+      } else if (err instanceof ImageKitServerError) {
+        setError("ImageKit server error.");
+      } else {
+        setError("Something went wrong.");
+      }
+
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const cancelUpload = () => {
+    abortControllerRef.current.abort();
+  };
+
+  return (
+    <div
+      style={{
+        maxWidth: "500px",
+        margin: "30px auto",
+        display: "flex",
+        flexDirection: "column",
+        gap: "15px",
+      }}
+    >
+      <input
+        type="file"
+        ref={fileInputRef}
+        accept="image/*"
+      />
+
+      <button
+        onClick={handleUpload}
+        disabled={loading}
+      >
+        {loading ? "Uploading..." : "Upload Image"}
+      </button>
+
+      {loading && (
+        <button
+          onClick={cancelUpload}
+          style={{
+            background: "red",
+            color: "white",
+          }}
+        >
+          Cancel Upload
+        </button>
+      )}
+
+      <progress
+        value={progress}
+        max={100}
+      />
+
+      <p>{progress}%</p>
+
+      {error && (
+        <p style={{ color: "red" }}>
+          {error}
+        </p>
+      )}
+
+      {imageUrl && (
+        <div>
+          <h3>Uploaded Image</h3>
+
+          <img
+            src={imageUrl}
+            alt="Uploaded"
+            style={{
+              width: "100%",
+              borderRadius: "10px",
+            }}
+          />
+
+          <p>
+            <strong>URL:</strong>
+          </p>
+
+          <a
+            href={imageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {imageUrl}
+          </a>
+        </div>
+      )}
+    </div>
+  );
 };
 
 export default FileUpload;
